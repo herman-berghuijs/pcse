@@ -11,7 +11,7 @@ from .. import signals
 
 from .soil_profile import SoilProfile
 
-REFERENCE_TEST_RUN = False  # set by testing procedure
+REFERENCE_TEST_RUN = True  # set by testing procedure    
 
 class WaterBalanceLayered_PP(SimulationObject):
     _default_RD = Float(10.)  # default rooting depth at 10 cm
@@ -135,9 +135,8 @@ class WaterBalanceLayered(SimulationObject):
     into account, however, the contribution of an upward flow from further down.
 
     The configuration of the soil layers is variable but is bound to certain limitations:
-
     - The layer thickness cannot be made too small. In practice, the top layer should not
-      be smaller than 10 to 20 cm. Smaller layers would require smaller time steps than
+      be smaller than 20 to 30 cm. Smaller layers would require smaller time steps than
       one day to simulate realistically, since rain storms will fill up the top layer very
       quickly leading to surface runoff because the model cannot handle the infiltration of
       the rainfall in a single timestep (a day).
@@ -148,103 +147,14 @@ class WaterBalanceLayered(SimulationObject):
     The current python implementation does not yet implement the impact of shallow groundwater
     but this will be added in future versions of the model.
 
-    For an introduction to the concept of Matric Flux Potential see for example:
-
-        Pinheiro, Everton Alves Rodrigues, et al. “A Matric Flux Potential Approach to Assess Plant Water
-        Availability in Two Climate Zones in Brazil.” Vadose Zone Journal, vol. 17, no. 1, Jan. 2018, pp. 1–10.
-        https://doi.org/10.2136/vzj2016.09.0083.
-
-    **Note**: the current implementation of the model (April 2024) is rather 'Fortran-ish'. This has been done
+    **note**: the current implementation of the model is rather 'Fortran-ish'. This has been done
     on purpose to allow comparisons with the original code in Fortran90. When we are sure that
     the implementation performs properly, we can refactor this in to a more functional structure
-    instead of the current code which is too long and full of loops.
+    instead of the
 
-
-    **Simulation parameters:**
-
-    Besides the parameters in the table below, the multi-layer waterbalance requires
-    a `SoilProfileDescription` which provides the properties of the different soil
-    layers. See the `SoilProfile` and `SoilLayer` classes for the details.
-
-    ========== ====================================================  ====================
-     Name      Description                                           Unit
-    ========== ====================================================  ====================
-    NOTINF     Maximum fraction of rain not-infiltrating into          -
-               the soil
-    IFUNRN     Indicates whether non-infiltrating fraction of   SSi    -
-               rain is a function of storm size (1)
-               or not (0)
-    SSI        Initial surface storage                                 cm
-    SSMAX      Maximum surface storage                                 cm
-    SMLIM      Maximum soil moisture content of top soil layer         cm3/cm3
-    WAV        Initial amount of water in the soil                     cm
-    ========== ====================================================  ====================
-
-
-    **State variables:**
-
-    =======  ========================================================  ============
-     Name     Description                                                  Unit
-    =======  ========================================================  ============
-    WTRAT     Total water lost as transpiration as calculated           cm
-              by the water balance. This can be different
-              from the CTRAT variable which only counts
-              transpiration for a crop cycle.
-    EVST      Total evaporation from the soil surface                   cm
-    EVWT      Total evaporation from a water surface                    cm
-    TSR       Total surface runoff                                      cm
-    RAINT     Total amount of rainfall (eff + non-eff)                  cm
-    WDRT      Amount of water added to root zone by increase            cm
-              of root growth
-    TOTINF    Total amount of infiltration                              cm
-    TOTIRR    Total amount of effective irrigation                      cm
-
-    SM        Volumetric moisture content in the different soil          -
-              layers (array)
-    WC        Water content in the different soil                       cm
-              layers (array)
-    W         Amount of water in root zone                              cm
-    WLOW      Amount of water in the subsoil (between current           cm
-              rooting depth and maximum rootable depth)
-    WWLOW     Total amount of water                                     cm
-              in the  soil profile (WWLOW = WLOW + W)
-    WBOT      Water below maximum rootable depth and unavailable
-              for plant growth.                                         cm
-    WAVUPP    Plant available water (above wilting point) in the        cm
-              rooted zone.
-    WAVLOW    Plant available water (above wilting point) in the        cm
-              potential root zone (below current roots)
-    WAVBOT    Plant available water (above wilting point) in the        cm
-              zone below the maximum rootable depth
-    SS        Surface storage (layer of water on surface)               cm
-    SM_MEAN   Mean water content in rooted zone                         cm3/cm3
-    PERCT     Total amount of water percolating from rooted             cm
-              zone to subsoil
-    LOSST     Total amount of water lost to deeper soil                 cm
-    =======  ========================================================  ============
-
-
-    **Rate variables**
-
-    ========== ==================================================  ====================
-     Name      Description                                          Unit
-    ========== ==================================================  ====================
-    Flow        Rate of flow from one layer to the next              cm/day
-    RIN         Rate of infiltration at the surface                  cm/day
-    WTRALY      Rate of transpiration from the different
-                soil layers (array)                                  cm/day
-    WTRA        Total crop transpiration rate accumulated over       cm/day
-                soil layers.
-    EVS         Soil evaporation rate                                cm/day
-    EVW         Open water evaporation rate                          cm/day
-    RIRR        Rate of irrigation                                   cm/day
-    DWC         Net change in water amount per layer (array)         cm/day
-    DRAINT      Change in rainfall accumlation                       cm/day
-    DSS         Change in surface storage                            cm/day
-    DTSR        Rate of surface runoff                               cm/day
-    BOTTOMFLOW  Flow of the bottom of the profile                    cm/day
-    ========== ==================================================  ====================
     """
+    
+    
     _default_RD = Float(10.)  # default rooting depth at 10 cm
     _RDold = _default_RD
     _RINold = Float(0.)
@@ -261,6 +171,9 @@ class WaterBalanceLayered(SimulationObject):
     # Maximum upward flow is 50% of amount needed to reach equilibrium between layers
     # see documentation Kees Rappoldt - page 80
     UpwardFlowLimit = 0.50
+    
+    # Maximum depth that the groundwater level can reach
+    XDEF = 1000.
 
     # placeholders for soil object and parameter provider
     soil_profile = None
@@ -276,6 +189,10 @@ class WaterBalanceLayered(SimulationObject):
         SSMAX = Float(None)
         SMLIM = Float(None)
         WAV = Float(None)
+        
+        IDRAIN = Bool(None)
+        DD = Float(None)
+        ZTI = Float(None)
 
     class StateVariables(StatesTemplate):
         WTRAT = Float(None)
@@ -298,7 +215,10 @@ class WaterBalanceLayered(SimulationObject):
         WAVLOW = Float(None)
         WAVBOT = Float(None)
         SS = Float(None)
-        BOTTOMFLOWT = Float(None)
+        BOTTOMFLOWT = Float(None) 
+        
+        WSUB = Float(None)
+        ZT = Float(None)
 
 
     class RateVariables(RatesTemplate):
@@ -313,11 +233,21 @@ class WaterBalanceLayered(SimulationObject):
         DRAINT = Float(None)
         DSS = Float(None)
         DTSR = Float(None)
-        BOTTOMFLOW = Float(None)
+        BOTTOMFLOW = Float(None)        
+        DWSUB = Float(None)
 
     def initialize(self, day, kiosk, parvalues):
+        from .soil_profile import SoilProfile, WaterFromHeightCurve, HeightFromAirCurve
+        
+        self.soil_profile = SoilProfile(parvalues) 
+        self.soil_profile.determine_depth_lower_boundaries()     
+        if(self.soil_profile.GroundWater):                   
+            for il, layer in enumerate(self.soil_profile):
+                layer.WaterFromHeight = WaterFromHeightCurve(layer.SMfromPF)
+                layer.HeightFromAir = HeightFromAirCurve(layer.SMfromPF, layer.WaterFromHeight)
+            self.soil_profile.SubSoilType.WaterFromHeight = self.soil_profile[-1].WaterFromHeight
+            self.soil_profile.SubSoilType.HeightFromAir = self.soil_profile[-1].HeightFromAir                
 
-        self.soil_profile = SoilProfile(parvalues)
         parvalues._soildata["soil_profile"] = self.soil_profile
 
         # Maximum rootable depth
@@ -339,8 +269,70 @@ class WaterBalanceLayered(SimulationObject):
 
         self.soil_profile.determine_rooting_status(self._default_RD, self._RDM)
 
+        SM = np.zeros(len(self.soil_profile))
+        WC = np.zeros_like(SM)
+        Flow = np.zeros(len(self.soil_profile) + 1)
+        
         if self.soil_profile.GroundWater:
-            raise NotImplementedError("Groundwater influence not yet implemented.")
+            RD = self._determine_rooting_depth()
+            ZT = limit(0.1, self.soil_profile.SubSoilType.DepthLowerBoundary, p.ZTI)
+
+            if(p.IDRAIN):
+                    ZT = max(ZT, p.DD)  # corrected for drainage depth
+            else:
+                pass
+            
+            for il, layer in enumerate(self.soil_profile):
+                LBSL = layer.DepthLowerBoundary
+                TSL = layer.Thickness    
+                SM0 = layer.SM0
+                SMfromPF = layer.SMfromPF
+                WaterFromHeight = layer.WaterFromHeight
+                HH = LBSL - TSL / 2.0 # depth at half-layer-height                
+                if (LBSL - ZT < 0.0):
+                    # layer is above groundwater ; get equilibrium amount from Half-Height pressure head
+                    SM[il] = layer.SMfromPF(np.log10(ZT-HH)) 
+                elif(LBSL - TSL >= ZT):
+                    # layer completely in groundwater
+                    SM[il] = SM0
+                else:
+                    # layer partly in groundwater
+                    SM[il] = ((LBSL-ZT)*SM0 + WaterFromHeight(ZT-(LBSL-TSL))) / TSL
+                WC[il] = SM[il] * TSL
+            #    calculate (available) water in rooted and potentially rooted zone
+            #    note that water amount WBOT below depth RDM (RDMSLB)
+            #    is never available ; it is below potential rooting depth                    
+            W    = 0.0
+            WAVUPP = 0.0
+            WLOW = 0.0
+            WAVLOW = 0.0
+            WBOT = 0.0
+            WAVBOT = 0.0 
+            
+            for il, layer in enumerate(self.soil_profile):
+                W      = W    + SM[il] * layer.Thickness * layer.Wtop
+                WLOW   = WLOW + SM[il] * layer.Thickness * layer.Wpot
+                WBOT   = WBOT + SM[il] * layer.Thickness * layer.Wund
+            #  available water
+                WAVUPP = WAVUPP + (SM[il]-layer.SMW) * layer.Thickness * layer.Wtop
+                WAVLOW = WAVLOW + (SM[il]-layer.SMW) * layer.Thickness * layer.Wpot
+
+            # now various subsoil amonts 
+            LBSLBOT = self.soil_profile[-1].DepthLowerBoundary
+            LBSUB = self.soil_profile.SubSoilType.DepthLowerBoundary
+            SubSM0 = self.soil_profile.SubSoilType.SM0
+            WaterFromHeight = self.soil_profile.SubSoilType.WaterFromHeight
+            
+            if(ZT > LBSLBOT):
+                # Groundwater below layered system
+                WSUB =  (LBSUB - ZT) * SubSM0 + WaterFromHeight(ZT - LBSLBOT)
+            else:
+                # Saturated sub soil
+                WSUB = (LBSUB - LBSLBOT) * SubSM0
+            
+            # Then amount of moisture below rooted zone
+            WZ = WLOW + WBOT + WSUB
+            WZI = WZ
         else:
             # AVMAX -  maximum available content of layer(s)
             # This is calculated first to achieve an even distribution of water in the rooted top
@@ -367,67 +359,66 @@ class WaterBalanceLayered(SimulationObject):
                 else:  # Below the potentially rooted zone
                     break
 
-        if p.WAV <= 0.0:
-            # no available water
-            TOPRED = 0.0
-            LOWRED = 0.0
-        elif p.WAV <= TOPLIM:
-            # available water fits in layer(s) 1..ILR, these layers are rooted or almost rooted
-            # reduce amounts with ratio WAV / TOPLIM
-            TOPRED = p.WAV / TOPLIM
-            LOWRED = 0.0
-        elif p.WAV < TOPLIM + LOWLIM:
-            # available water fits in potentially rooted layer
-            # rooted zone is filled at capacity ; the rest reduced
-            TOPRED = 1.0
-            LOWRED = (p.WAV-TOPLIM) / LOWLIM
-        else:
-            # water does not fit ; all layers "full"
-            TOPRED = 1.0
-            LOWRED = 1.0
-
-        W = 0.0    ; WAVUPP = 0.0
-        WLOW = 0.0 ; WAVLOW = 0.0
-        SM = np.zeros(len(self.soil_profile))
-        WC = np.zeros_like(SM)
-        Flow = np.zeros(len(self.soil_profile) + 1)
-        for il, layer in enumerate(self.soil_profile):
-            if layer.rooting_status in ["rooted", "partially rooted"]:
-                # Part of the water assigned to ILR may not actually be in the rooted zone, but it will
-                # be available shortly through root growth (and through numerical mixing).
-                SM[il] = layer.SMW + AVMAX[il] * TOPRED / layer.Thickness
-                W += SM[il] * layer.Thickness * layer.Wtop
-                WLOW += SM[il] * layer.Thickness * layer.Wpot
-                # available water
-                WAVUPP += (SM[il] - layer.SMW) * layer.Thickness * layer.Wtop
-                WAVLOW += (SM[il] - layer.SMW) * layer.Thickness * layer.Wpot
-            elif layer.rooting_status == "potentially rooted":
-                SM[il] = layer.SMW + AVMAX[il] * LOWRED / layer.Thickness
-                WLOW += SM[il] * layer.Thickness * layer.Wpot
-                # available water
-                WAVLOW += (SM[il] - layer.SMW) * layer.Thickness * layer.Wpot
+            if p.WAV <= 0.0:
+                # no available water
+                TOPRED = 0.0
+                LOWRED = 0.0
+            elif p.WAV <= TOPLIM:
+                # available water fits in layer(s) 1..ILR, these layers are rooted or almost rooted
+                # reduce amounts with ratio WAV / TOPLIM
+                TOPRED = p.WAV / TOPLIM
+                LOWRED = 0.0
+            elif p.WAV < TOPLIM + LOWLIM:
+                # available water fits in potentially rooted layer
+                # rooted zone is filled at capacity ; the rest reduced
+                TOPRED = 1.0
+                LOWRED = (p.WAV-TOPLIM) / LOWLIM
             else:
-                # below the maximum rooting depth, set SM content to wilting point
-                SM[il] = layer.SMW
-            WC[il] = SM[il] * layer.Thickness
+                # water does not fit ; all layers "full"
+                TOPRED = 1.0
+                LOWRED = 1.0
 
-            # set groundwater depth far away for clarity ; this prevents also
-            # the root routine to stop root growth when they reach the groundwater
-            ZT = 999.0
+            W = 0.0    ; WAVUPP = 0.0
+            WLOW = 0.0 ; WAVLOW = 0.0
+            # SM = np.zeros(len(self.soil_profile))
+            for il, layer in enumerate(self.soil_profile):
+                if layer.rooting_status in ["rooted", "partially rooted"]:
+                    # Part of the water assigned to ILR may not actually be in the rooted zone, but it will
+                    # be available shortly through root growth (and through numerical mixing).
+                    SM[il] = layer.SMW + AVMAX[il] * TOPRED / layer.Thickness
+                    W += SM[il] * layer.Thickness * layer.Wtop
+                    WLOW += SM[il] * layer.Thickness * layer.Wpot
+                    # available water
+                    WAVUPP += (SM[il] - layer.SMW) * layer.Thickness * layer.Wtop
+                    WAVLOW += (SM[il] - layer.SMW) * layer.Thickness * layer.Wpot
+                elif layer.rooting_status == "potentially rooted":
+                    SM[il] = layer.SMW + AVMAX[il] * LOWRED / layer.Thickness
+                    WLOW += SM[il] * layer.Thickness * layer.Wpot
+                    # available water
+                    WAVLOW += (SM[il] - layer.SMW) * layer.Thickness * layer.Wpot
+                else:
+                    # below the maximum rooting depth, set SM content to wilting point
+                    SM[il] = layer.SMW
+                WC[il] = SM[il] * layer.Thickness
+
+                # set groundwater depth far away for clarity ; this prevents also
+                # the root routine to stop root growth when they reach the groundwater
+                ZT = 999.0
+                WSUB = 0.
 
         # soil evaporation, days since last rain
         top_layer = self.soil_profile[0]
         top_layer_half_wet = top_layer.SMW + 0.5 * (top_layer.SMFCF - top_layer.SMW)
         self._DSLR = 5 if SM[0] <= top_layer_half_wet else 1
 
-        # all summation variables of the water balance are set at zero.
+        # all summation variables of the water balance are set at zero.               
         states = {"WTRAT": 0., "EVST": 0., "EVWT": 0., "TSR": 0., "WDRT": 0.,
-                  "TOTINF": 0., "TOTIRR": 0., "BOTTOMFLOWT": 0.,
-                  "CRT": 0., "RAINT": 0., "WLOW": WLOW, "W": W, "WC": WC, "SM":SM,
-                  "SS": p.SSI, "WWLOW": W+WLOW, "WBOT":0., "SM_MEAN": W/self._default_RD,
-                  "WAVUPP": WAVUPP, "WAVLOW": WAVLOW, "WAVBOT":0.
-                  }
-        self.states = self.StateVariables(kiosk, publish=["WC", "SM", "EVST"], **states)
+                    "TOTINF": 0., "TOTIRR": 0., "BOTTOMFLOWT": 0.,
+                    "CRT": 0., "RAINT": 0., "WLOW": WLOW, "W": W, "WC": WC, "SM":SM,
+                    "SS": p.SSI, "WWLOW": W+WLOW, "WBOT":0., "SM_MEAN": W/self._default_RD,
+                    "WAVUPP": WAVUPP, "WAVLOW": WAVLOW, "WAVBOT":0., "WSUB": WSUB, "ZT": ZT
+                    }
+        self.states = self.StateVariables(kiosk, publish=["WC", "SM", "EVST"], **states)           
 
         # Initial values for profile water content
         self._WCI = WC.sum()
@@ -435,6 +426,7 @@ class WaterBalanceLayered(SimulationObject):
         # rate variables
         self.rates = self.RateVariables(kiosk, publish=["RIN", "Flow", "EVS"])
         self.rates.Flow = Flow
+
 
         # Connect to CROP_START/CROP_FINISH/IRRIGATE signals
         self._connect_signal(self._on_CROP_START, signals.crop_start)
@@ -501,13 +493,33 @@ class WaterBalanceLayered(SimulationObject):
         # conductivities and Matric Flux Potentials for all layers
         pF = np.zeros_like(s.SM)
         conductivity = np.zeros_like(s.SM)
+        
         matricfluxpot = np.zeros_like(s.SM)
+
         for i, layer in enumerate(self.soil_profile):
             pF[i] = layer.PFfromSM(s.SM[i])
             conductivity[i] = 10**layer.CONDfromPF(pF[i])
             matricfluxpot[i] = layer.MFPfromPF(pF[i])
-            if self.soil_profile.GroundWater:
-                raise NotImplementedError("Groundwater influence not yet implemented.")
+            
+        if self.soil_profile.GroundWater:
+            # Equilibrium amounts
+            EquilWater = np.zeros_like(s.SM)
+            for i, layer in enumerate(self.soil_profile):
+                SMsat = layer.SMfromPF(-1)
+                WaterFromHeight = layer.WaterFromHeight
+                LBSL = layer.DepthLowerBoundary
+                TSL = layer.Thickness
+                WC0 = layer.WC0                
+                if(LBSL < s.ZT):
+                    # Groundwater below layer
+                    EquilWater[i] = WaterFromHeight(s.ZT-LBSL+TSL) - WaterFromHeight(s.ZT-LBSL)
+                elif(LBSL-TSL < s.ZT):
+                    # Groundwater in layer
+                    EquilWater[i] = WaterFromHeight(s.ZT-LBSL+TSL) + (LBSL-s.ZT) * SMsat   
+                else:
+                    # Ground water above layer
+                    EquilWater[i] = WC0
+                # raise NotImplementedError("Groundwater influence not yet implemented.")
 
         # Potentially infiltrating rainfall
         if p.IFUNRN == 0:
@@ -545,41 +557,63 @@ class WaterBalanceLayered(SimulationObject):
         FlowMX = np.zeros(len(s.SM) + 1)
         # first get flow through lower boundary of bottom layer
         if self.soil_profile.GroundWater:
-            raise NotImplementedError("Groundwater influence not yet implemented.")
-        #    the old capillairy rise routine is used to estimate flow to/from the groundwater
-        #    note that this routine returns a positive value for capillairy rise and a negative
-        #    value for downward flow, which is the reverse from the convention in WATFDGW.
+            if(s.ZT >= self.soil_profile[-1].DepthLowerBoundary):
+                
+                # the old capillairy rise routine is used to estimate flow to/from the groundwater
+                # note that this routine returns a positive value for capillairy rise and a negative
+                # value for downward flow, which is the reverse from the convention in WATFDGW.                                
+                from .subsol import calculate_flow_subsoil
+                
+                # Define some help variables
+                CONTABLowestLayer = self.soil_profile[-1].CONDfromPF               
+                pFLowestSoilLayer = self.soil_profile[-1].PFfromSM(s.SM[-1])
+                depth_lowest_layer = self.soil_profile[-1].DepthLowerBoundary               
+                depth_subsoil = self.soil_profile.SubSoilType.DepthLowerBoundary  
+                HeightFromAir = self.soil_profile[-1].HeightFromAir                
+                thickness_subsoil = self.soil_profile.SubSoilType.Thickness
+                thickness_lowest_layer = self.soil_profile[-1].Thickness
+                SubSM0 = self.soil_profile.SubSoilType.SM0
+                WSUB0 = self.soil_profile.SubSoilType.WC0                   
+                WaterFromHeight = self.soil_profile[-1].WaterFromHeight                
+                WC0_lowest_layer = self.soil_profile[-1].WC0
 
-        # is = SubSoilType
-        # if (ZT >= LBSL(NSL)) then
-        #     # groundwater below the layered system ; call the old capillairty rise routine
-        #     # the layer PF is allocated at 1/3 * TSL above the lower boundary ; this leeds
-        #     # to a reasonable result for groundwater approaching the bottom layer
-        #     call SUBSOL (PF(NSL), ZT-LBSL(NSL)+TSL(NSL)/3.0, SubFlow, Soil(is)%CONDfromPF, Soil(is)%ilCOND)
-        #     # write (*,*) 'call SUBSOL ', PF(NSL), ZT-LBSL(NSL)+TSL(NSL)/3.0, SubFlow
-        #     if (SubFlow >= 0.0) then
-        #         # capillairy rise is limited by the amount required to reach equilibrium:
-        #         # step 1. calculate equilibrium ZT for all air between ZT and top of layer
-        #         EqAir   = WSUB0 - WSUB + (WC0(NSL)-WC(NSL))
-        #         # step 2. the groundwater level belonging to this amount of air in equilibrium
-        #         ZTeq1   = (LBSL(NSL)-TSL(NSL)) + AFGEN(Soil(is)%HeightFromAir, EquilTableLEN, EqAir)
-        #         # step 3. this level should normally lie below the current level (otherwise there should
-        #         # not be capillairy rise). In rare cases however, due to the use of a mid-layer height
-        #         # in subroutine SUBSOL, a deviation could occur
-        #         ZTeq2   = MAX(ZT, ZTeq1)
-        #         # step 4. calculate for this ZTeq2 the equilibrium amount of water in the layer
-        #         WCequil = AFGEN(Soil(is)%WaterFromHeight, EquilTableLEN, ZTeq2-LBSL(NSL)+TSL(NSL)) - &
-        #                   AFGEN(Soil(is)%WaterFromHeight, EquilTableLEN, ZTeq2-LBSL(NSL))
-        #         # step5. use this equilibrium amount to limit the upward flow
-        #         FlowMX(NSL+1) = -1.0 * MIN (SubFlow, MAX(WCequil-WC(NSL),0.0)/DELT)
-        #     else:
-        #         # downward flow ; air-filled pore space of subsoil limits downward flow
-        #         AirSub = (ZT-LBSL(NSL))*SubSM0 - AFGEN(Soil(is)%WaterFromHeight, EquilTableLEN, ZT-LBSL(NSL))
-        #         FlowMX(NSL+1) = MIN (ABS(SubFlow), MAX(AirSub,0.0)/DELT)
-        #         # write (*,*) 'Limiting downward flow: AirSub, FlowMX(NSL+1) = ', AirSub, FlowMX(NSL+1)
-        # else:
-        #     # groundwater is in the layered system ; no further downward flow
-        #     FlowMX(NSL+1) = 0.0
+                if(s.ZT > depth_lowest_layer):
+                    # Groundwater below layered system
+                    WSUB =  (depth_subsoil - s.ZT) * SubSM0 + WaterFromHeight(s.ZT - depth_lowest_layer)
+                else:
+                    # Saturated sub soil
+                    WSUB = (depth_subsoil - depth_lowest_layer) * SubSM0
+                    
+                WC_lowest_layer = s.SM[-1] * thickness_lowest_layer
+                
+                D = s.ZT - depth_lowest_layer + thickness_lowest_layer/3.0
+                SubFlow = calculate_flow_subsoil(pFLowestSoilLayer, D, CONTABLowestLayer)
+                
+                if(SubFlow >= 0):                    
+                    # capillairy rise is limited by the amount required to reach equilibrium:
+                    
+                    # step 1. calculate equilibrium ZT for all air between ZT and top of laye
+                    EqAir = WSUB0 - WSUB + (WC0_lowest_layer - WC_lowest_layer)                    
+                    
+                    # step 2. the groundwater level belonging to this amount of air in equilibrium
+                    ZTeq1   = (depth_lowest_layer-thickness_lowest_layer) + HeightFromAir(EqAir)
+                    
+                    # step 3. this level should normally lie below the current level (otherwise there should
+                    # not be capillairy rise). In rare cases however, due to the use of a mid-layer height
+                    # in subroutine SUBSOL, a deviation could occur
+                    ZTeq2   = max(s.ZT, ZTeq1)
+
+                    # step 4. calculate for this ZTeq2 the equilibrium amount of water in the layer
+                    WCequil = WaterFromHeight(ZTeq2-depth_lowest_layer+thickness_lowest_layer) - WaterFromHeight(ZTeq2-depth_lowest_layer)
+                    
+                    # step5. use this equilibrium amount to limit the upward flow
+                    FlowMX[-1] = -1.0 * min (SubFlow, max(WCequil-WC_lowest_layer,0.0)/delt)
+                else:
+                    # downward flow ; air-filled pore space of subsoil limits downward flow
+                    AirSub = (s.ZT-depth_lowest_layer)*SubSM0 - WaterFromHeight(s.ZT-depth_lowest_layer) 
+                    FlowMX[-1] = min(abs(SubFlow), max(AirSub,0.0)/delt)
+            else:
+                FlowMX[-1] = 0.
         else:
             # Bottom layer conductivity limits the flow. Below field capacity there is no
             # downward flow, so downward flow through lower boundary can be guessed as
@@ -671,8 +705,7 @@ class WaterBalanceLayered(SimulationObject):
                     # if (il==2) write (*,*) '2: ',FlowMax, LIMDRY(il), EqualPotAmount * UpwardFlowLimit
                     if self.soil_profile.GroundWater:
                         # soil does not drain below equilibrium with groundwater
-                        # FCequil = MAX(WCFC(il-1), EquilWater(il-1))
-                        raise NotImplementedError("Groundwater influence not implemented yet.")
+                        FCequil = max(self.soil_profile[il-1].WCFC, EquilWater[il-1])
                     else:
                         # free drainage
                         FCequil = self.soil_profile[il-1].WCFC
@@ -689,7 +722,9 @@ class WaterBalanceLayered(SimulationObject):
                         # target layer is "wet", above field capacity. Since gravity is neglected
                         # in the matrix potential model, this "wet" upward flow is neglected.
                         FlowMX[il] = 0.0
-                        FlowDown = True
+                        
+                        # Implementation Allard states that FlowDown = True, but according to Rappoldt it is false. What is correct?
+                        FlowDown = False
                     else:
                         # target layer is "wet", above field capacity, without groundwater
                         # The free drainage model implies that upward flow is rejected here.
@@ -741,8 +776,7 @@ class WaterBalanceLayered(SimulationObject):
         for il, layer in enumerate(self.soil_profile):
             if self.soil_profile.GroundWater:
                 # soil does not drain below equilibrium with groundwater
-                #WaterLeft = max(self.WCFC[il], EquilWater[il])
-                raise NotImplementedError("Groundwater influence not implemented yet.")
+                WaterLeft = max(self.soil_profile[il].WCFC, EquilWater[il])
             else:
                 # free drainage
                 WaterLeft = layer.WCFC
@@ -755,11 +789,51 @@ class WaterBalanceLayered(SimulationObject):
         # Flow at the bottom of the profile
         r.BOTTOMFLOW = Flow[-1]
 
+        # ! Percolation and Loss.
+        # ! Equations were derived from the requirement that in the same layer, above and below
+        # ! depth RD (or RDM), the water content is uniform. Note that transpiration above depth
+        # ! RD (or RDM) may require a negative percolation (or loss) for keeping the layer uniform.
+        # ! This is in fact a numerical dispersion. After reaching RDM, this negative (LOSS) can be
+        # ! prevented by choosing a layer boundary at RDM.
+        
+        # Find index of deepest layers containing rooted soil (ILR) and deepest layer that will contain roots (ILM)
+        # ILR = len(self.soil_profile) - 1
+        # ILM = len(self.soil_profile) - 1
+        # RD = self._determine_rooting_depth()
+        # for il, layer in reversed(list(enumerate(self.soil_profile))):
+        #     if(layer.DepthLowerBoundary >= RD):
+        #         ILR = il
+        #     if(layer.DepthLowerBoundary >= self._RDM):
+        #         ILM = il
+        
+        # if(ILR < ILM):
+        #     # layer ILR is devided into rooted part (where the sink is) and a below-roots part
+        #     # The flow in between is PERC            
+        #     f1 = self.soil_profile[ILR].Wtop
+        #     PERC = (1.0-f1) * (Flow[ILR]-WTRALY[ILR]) + f1 * Flow[ILR+1]
+            
+        #     # layer ILM is divided as well ; the flow in between is LOSS
+        #     f1 = self.soil_profile[ILM].Wpot
+        #     LOSS = (1.0-f1) * Flow[ILM] + f1 * Flow[ILM+1]
+        
+        # elif(ILR == ILM):
+        #     f1 = self.soil_profile(ILR).Wtop
+        #     f2 = self.soil_profile(ILM).Wpot
+        #     f3 = 1.0 - f1 - f2
+        #     LOSS = f3 * (Flow[ILR]-WTRALY[ILR]) + (1.0-f3) * Flow[ILR+1]
+        #     PERC = (1.0-f1) * (Flow[ILR]-WTRALY[ILR]) + f1 * Flow[ILR+1]
+        # else:
+        #     msg = "The index of the lowest rootable soil layer cannot be smaller than the index of the lowest rooted soil layer"
+        #     raise Exception(msg)
+            
+        # r.PERC = PERC
+
         if self.soil_profile.GroundWater:
             # groundwater influence
-            # DWBOT = LOSS - Flow[self.NSL+1]
-            # DWSUB = Flow[self.NSL+1]
-            raise NotImplementedError("Groundwater influence not implemented yet.")
+            # DWBOT = LOSS - Flow[-1]
+            DWSUB = Flow[-1]
+            r.DWSUB = DWSUB
+            pass
 
         # Computation of rate of change in surface storage and surface runoff
         # SStmp is the layer of water that cannot infiltrate and that can potentially
@@ -815,15 +889,15 @@ class WaterBalanceLayered(SimulationObject):
         s.BOTTOMFLOWT += r.BOTTOMFLOW * delt
 
         # percolation from rootzone ; interpretation depends on mode
-        if self.soil_profile.GroundWater:
-            # with groundwater this flow is either percolation or capillary rise
-            if r.PERC > 0.0:
-                s.PERCT = s.PERCT + r.PERC * delt
-            else:
-                s.CRT = s.CRT - r.PERC * delt
-        else:
-            # without groundwater this flow is always called percolation
-            s.CRT = 0.0
+        # if self.soil_profile.GroundWater:
+        #     # with groundwater this flow is either percolation or capillary rise
+        #     if r.PERC > 0.0:
+        #         s.PERCT = s.PERCT + r.PERC * delt
+        #     else:
+        #         s.CRT = s.CRT - r.PERC * delt
+        # else:
+        #     # without groundwater this flow is always called percolation
+        #     s.CRT = 0.0
 
         # change of rootzone
         RD = self._determine_rooting_depth()
@@ -842,7 +916,12 @@ class WaterBalanceLayered(SimulationObject):
             WAVUPP += (s.WC[il] - layer.WCW) * layer.Wtop
             WAVLOW += (s.WC[il] - layer.WCW) * layer.Wpot
             WAVBOT += (s.WC[il] - layer.WCW) * layer.Wund
+            
+        if(self.soil_profile.GroundWater):
+            WSUB = s.WSUB
+            WSUB+= r.DWSUB * delt
 
+        
         # Update states
         s.W = W
         s.WLOW = WLOW
@@ -851,31 +930,47 @@ class WaterBalanceLayered(SimulationObject):
         s.WAVUPP = WAVUPP
         s.WAVLOW = WAVLOW
         s.WAVBOT = WAVBOT
-
+        
+        if(self.soil_profile.GroundWater):
+            # Update ground water amount
+            s.WSUB = WSUB
+            
+            # Update ground water level
+            ZTfound = False
+            for il, layer in reversed(list(enumerate(self.soil_profile))):
+                HeightFromAir = layer.HeightFromAir
+                if(il == len(self.soil_profile) - 1):                    
+                    WSUB0 = self.soil_profile.SubSoilType.WC0
+                    AirSub = WSUB0 - s.WSUB
+                    if(AirSub > 0.01):
+                        # groundwater is in subsoil which is not completely saturated
+                        s.ZT = min(layer.DepthLowerBoundary + HeightFromAir(AirSub), self.soil_profile.SubSoilType.DepthLowerBoundary)
+                        ZTfound = True
+                        break
+                    if(s.SM[il] < 0.99 * layer.SM0):
+                         # groundwater is in this layer
+                         s.ZT = layer.DepthLowerBoundary - layer.Thickness + min(layer.Thickness,  HeightFromAir(layer.WC0-s.WC[il]))
+                         ZTfound = True
+                         break
+            if(ZTfound == False):
+                # entire system saturated
+                s.ZT = 0.0
         # save rooting depth for which layer contents have been determined
         self._RDold = RD
-
         s.SM_MEAN = s.W/RD
 
     @prepare_states
     def finalize(self, day):
         s = self.states
         p = self.params
-        if self.soil_profile.GroundWater:
-            # checksums waterbalance for system Groundwater version
-            # WBALRT_GW = TOTINF + CRT + WI - W + WDRT - EVST - TRAT - PERCT
-            # WBALTT_GW = SSI + RAINT + TOTIRR + WI - W + WZI - WZ - TRAT - EVWT - EVST - TSR - DRAINT - SS
-            pass
-        else:
-            # checksums waterbalance for system Free Drainage version
-            checksum = (p.SSI - s.SS  # change in surface storage
-                        + self._WCI - s.WC.sum()  # Change in soil water content
-                        + s.RAINT + s.TOTIRR  # inflows to the system
-                        - s.WTRAT - s.EVWT - s.EVST - s.TSR - s.BOTTOMFLOWT  # outflows from the system
-                        )
-            if abs(checksum) > 0.0001:
-                msg = "Waterbalance not closing on %s with checksum: %f" % (day, checksum)
-                raise exc.WaterBalanceError(msg)
+        checksum = (p.SSI - s.SS  # change in surface storage
+                    + self._WCI - s.WC.sum()  # Change in soil water content
+                    + s.RAINT + s.TOTIRR  # inflows to the system
+                    - s.WTRAT - s.EVWT - s.EVST - s.TSR - s.BOTTOMFLOWT  # outflows from the system
+                    )
+        if abs(checksum) > 0.0001:
+            msg = "Waterbalance not closing on %s with checksum: %f" % (day, checksum)
+            raise exc.WaterBalanceError(msg)
 
     def _determine_rooting_depth(self):
         """Determines appropriate use of the rooting depth (RD)
