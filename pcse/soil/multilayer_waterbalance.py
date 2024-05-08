@@ -183,6 +183,9 @@ class WaterBalanceLayered(SimulationObject):
     crop_start = Bool(False)
 
     class Parameters(ParamTemplate):
+        AUTOIRR = Bool(False)
+        IRR_threshold = Float(0.)
+
         IFUNRN = Int(None)
         NOTINF = Float(None)
         SSI = Float(None)
@@ -450,7 +453,14 @@ class WaterBalanceLayered(SimulationObject):
 
         # Rate of irrigation (RIRR)
         r.RIRR = self._RIRR
-        self._RIRR = 0.
+        if "TRALY" in self.kiosk:
+            if p.AUTOIRR:
+                for il, layer in enumerate(self.soil_profile):
+                    if(s.WC[il] < layer.WCFC):
+                        r.RIRR+= layer.WCFC - s.WC[il]
+                    else:
+                        r.RIRR+= 0.
+        self._RIRR = 0.       
 
         # copy rainfall rate for totalling in RAINT
         self._RAIN = drv.RAIN
