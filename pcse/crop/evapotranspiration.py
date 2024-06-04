@@ -495,6 +495,7 @@ class EvapotranspirationCO2Layered(SimulationObject):
     # stress (IDWST, IDOST)
     _IDWST = Int(0)
     _IDOST = Int(0)
+    _DSOS = Int(0)
 
     soil_profile = None
 
@@ -576,10 +577,21 @@ class EvapotranspirationCO2Layered(SimulationObject):
             # for non-rice crops, and possibly deficient land drainage
             RFOS[i] = 1.
             if p.IAIRDU == 0 and p.IOX == 1:
-                RFOSMX = limit(0., 1., (p.SM0 - k.SM)/p.CRAIRC)
-                # maximum reduction reached after 4 days
-                RFOS[i] = RFOSMX + (1. - min(k.DSOS, 4)/4.)*(1.-RFOSMX)
+                # HB 20240724: This code will not run, because 1) _DSOS was not determined in the old version of this module and
+                # 2) The kiosk does not contain a value for SM0 and SM is a vector instead of a scalar value.
+                # RFOSMX = limit(0., 1., (p.SM0 - k.SM)/p.CRAIRC)
+                # # maximum reduction reached after 4 days
+                # RFOS[i] = RFOSMX + (1. - min(k.DSOS, 4)/4.)*(1.-RFOSMX)
 
+                SMAIR = layer.SM0 - layer.CRAIRC
+                if(SM >= SMAIR):
+                    self._DSOS = min((self._DSOS + 1), 4)
+                else:
+                    self._DSOS = 0
+                
+                RFOSMX = limit(0., 1., (layer.SM0 - SM)/layer.CRAIRC)
+                RFOS[i] = RFOSMX + (1. - min( self._DSOS, 4)/4.)*(1.-RFOSMX)
+                # End HB 20240724:
             root_fraction = max(0.0, (min(k.RD, depth + layer.Thickness) - depth)) / k.RD
 
             # Max transpiration rate multiplied with reduction factors for oxygen and water,
